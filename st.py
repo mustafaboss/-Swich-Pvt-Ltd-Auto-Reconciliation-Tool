@@ -1,4 +1,4 @@
-# app.py — Final (original logic preserved + animated UI + logo)
+# app.py — Final (original logic preserved + animated UI + logo) — Cloud-safe
 import os
 import zipfile
 import shutil
@@ -11,19 +11,30 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --------------------
-# Config from .env (unchanged working logic)
+# Helpers: prefer Streamlit secrets; fallback to env (.env)
 # --------------------
-SFTP_HOST = os.getenv("SFTP_HOST")
-SFTP_PORT = int(os.getenv("SFTP_PORT") or 22)
-SFTP_USERNAME = os.getenv("SFTP_USERNAME")
-SFTP_PASSWORD = os.getenv("SFTP_PASSWORD")
-REMOTE_DIR = os.getenv("REMOTE_DIR", ".")
+def cfg(key, default=None):
+    try:
+        if key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+    return os.getenv(key, default)
 
-DB_SERVER = os.getenv("DB_SERVER")
-DB_NAME = os.getenv("DB_NAME")
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_DRIVER = os.getenv("DB_DRIVER", "ODBC Driver 18 for SQL Server")
+# --------------------
+# Config (same keys; now secrets-friendly)
+# --------------------
+SFTP_HOST = cfg("SFTP_HOST")
+SFTP_PORT = int(cfg("SFTP_PORT", 22) or 22)
+SFTP_USERNAME = cfg("SFTP_USERNAME")
+SFTP_PASSWORD = cfg("SFTP_PASSWORD")
+REMOTE_DIR = cfg("REMOTE_DIR", ".")
+
+DB_SERVER = cfg("DB_SERVER")
+DB_NAME = cfg("DB_NAME")
+DB_USER = cfg("DB_USER")
+DB_PASSWORD = cfg("DB_PASSWORD")
+DB_DRIVER = cfg("DB_DRIVER", "ODBC Driver 18 for SQL Server")
 
 LOCAL_ZIP = "temp_download.zip"
 EXTRACT_DIR = "temp_extracted"
@@ -36,7 +47,7 @@ PAGE_ICON = FAVICON_PATH if os.path.exists(FAVICON_PATH) else LOGO_PATH
 # --------------------
 # Page + CSS (animated hero, 3D cards, colorful buttons)
 # --------------------
-st.set_page_config(layout="wide", page_title="Swich Pvt Ltd — Reconciliation", page_icon=PAGE_ICON)
+st.set_page_config(layout="wide", page_title="Swich Pvt Ltd — Reconciliation", page_icon=PAGE_ICON if os.path.exists(PAGE_ICON) else "📊")
 st.markdown(
     """
     <style>
@@ -54,9 +65,9 @@ st.markdown(
     .hero {
         background: linear-gradient(135deg,var(--blue),var(--green));
         color:#fff;
-        padding: 50px 40px;            /* height via padding */
-        min-height: 200px;              /* enforce height */
-        width: 100%;                    /* full width of content area */
+        padding: 50px 40px;
+        min-height: 200px;
+        width: 100%;
         border-radius:20px;
         box-shadow: 0 20px 60px rgba(2,6,23,0.12), inset 0 -12px 30px rgba(255,255,255,0.08);
         margin-bottom: 20px;
@@ -64,7 +75,7 @@ st.markdown(
         animation: fadeUp .5s ease both;
     }
     .hero .logo {
-        width: 140px; height: 140px;   /* bigger logo */
+        width: 140px; height: 140px;
         object-fit: contain;
         border-radius:14px;
         box-shadow: 0 12px 28px rgba(20,184,166,0.12);
@@ -104,7 +115,6 @@ st.markdown(
         position: relative; overflow: hidden;
     }
     .stButton > button:hover, .stDownloadButton > button:hover { transform: translateY(-1px); filter: brightness(1.03); box-shadow: 0 16px 36px rgba(34,197,94,0.18); cursor:pointer; }
-    .stButton > button:active::after, .stDownloadButton > button:active::after { width:220%; height:220%; opacity:1; }
 
     /* Table hover */
     .stDataFrame table tbody tr:hover { box-shadow: inset 0 0 0 9999px rgba(14,165,233,0.06); transition: box-shadow .18s; }
@@ -362,7 +372,7 @@ st.write("DB sample (first rows):")
 st.dataframe(df_db.head(5))
 
 # --------------------
-# STEP C: Pivots (unchanged)
+# STEP C: Pivots (SAFE column rename to avoid ValueError)
 # --------------------
 st.subheader("📈 Pivots")
 
@@ -376,22 +386,34 @@ pivot_db = df_db.pivot_table(
     }
 )
 
-# flatten columns
-pivot_db.columns = ["Count of Amount", "Sum of Amount", "Sum of Charges", "Sum of Converted Amount"]
+# SAFE flatten/rename
+expected_columns = ["Count of Amount", "Sum of Amount", "Sum of Charges", "Sum of Converted Amount"]
+try:
+    if len(pivot_db.columns) == len(expected_columns):
+        pivot_db.columns = expected_columns
+    else:
+        # If MultiIndex present, stringify to avoid crash and warn
+        st.warning(f"⚠ Pivot column mismatch — expected {len(expected_columns)}, got {len(pivot_db.columns)}. Actual: {list(pivot_db.columns)}")
+        pivot_db.columns = [(" ".join(map(str, c)) if isinstance(c, tuple) else str(c)) for c in pivot_db.columns]
+except Exception as e:
+    st.warning(f"Could not rename pivot columns safely: {e}")
+    pivot_db.columns = [str(c) for c in pivot_db.columns]
+
 pivot_db = pivot_db.reset_index().fillna(0)
 
-# compute Net per date (Converted - Charges)
-if not pivot_db.empty:
+# compute Net per date (Converted - Charges) if columns exist
+if not pivot_db.empty and "Sum of Converted Amount" in pivot_db.columns and "Sum of Charges" in pivot_db.columns:
     pivot_db["Sum of Net Amt"] = pivot_db["Sum of Converted Amount"] - pivot_db["Sum of Charges"]
 
-# add suffix for merge clarity
-pivot_db = pivot_db.rename(columns={
+# add suffix for merge clarity (only rename if present)
+rename_map = {
     "Count of Amount": "Count of Amount_DB",
     "Sum of Amount": "Sum of Amount_DB",
     "Sum of Charges": "Sum of Charges_DB",
     "Sum of Converted Amount": "Sum of Converted Amount_DB",
     "Sum of Net Amt": "Sum of Net Amt_DB"
-})
+}
+pivot_db = pivot_db.rename(columns={k: v for k, v in rename_map.items() if k in pivot_db.columns})
 
 pivot_fz = df_fz.pivot_table(index="Txn Date", values="Amount", aggfunc=["count","sum"]).reset_index().fillna(0)
 pivot_fz.columns = ["Txn Date","Count of Amount_FZ","Sum of Amount_FZ"]
@@ -418,10 +440,13 @@ st.subheader("🔍 Reconciliation (Pivot summary)")
 if st.button("🔁 Reconcile Now"):
     merged = pd.merge(pivot_db, pivot_fz, on="Txn Date", how="outer").fillna(0)
     # diffs
-    merged["Diff - Count"] = merged["Count of Amount_DB"] - merged["Count of Amount_FZ"]
-    merged["Diff - Sum"] = merged["Sum of Amount_DB"] - merged["Sum of Amount_FZ"]
+    if "Count of Amount_DB" in merged.columns and "Count of Amount_FZ" in merged.columns:
+        merged["Diff - Count"] = merged["Count of Amount_DB"] - merged["Count of Amount_FZ"]
+    if "Sum of Amount_DB" in merged.columns and "Sum of Amount_FZ" in merged.columns:
+        merged["Diff - Sum"] = merged["Sum of Amount_DB"] - merged["Sum of Amount_FZ"]
     # per-date net (converted - charges) available in DB side already
-    merged["ConvertedMinusCharges_DB"] = merged["Sum of Converted Amount_DB"] - merged["Sum of Charges_DB"]
+    if "Sum of Converted Amount_DB" in merged.columns and "Sum of Charges_DB" in merged.columns:
+        merged["ConvertedMinusCharges_DB"] = merged["Sum of Converted Amount_DB"] - merged["Sum of Charges_DB"]
 
     # calculate charges based on whichever amount available (FZ sum priority)
     def calc_charge_row(x):
